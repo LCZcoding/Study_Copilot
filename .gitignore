@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 虚拟环境（uv 创建在 .venv）
+.venv/
+venv/
+ENV/
+
+# 环境变量（绝对不要提交！）
+.env
+.env.local
+.env.*.local
+
+# 项目工作笔记（不进 git）
+CODE_CONTEXT.md
+study-copilot-project-plan.md
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 上传的文档缓存（v0.5+ 用）
+data_cache/
+uploads/
+
+# 日志
+*.log
+logs/
