@@ -23,8 +23,7 @@ if sys.platform == "win32":
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from dotenv import load_dotenv
-
+# app.core.config 导入时自动加载 .env，无需手动 load_dotenv
 from app.core.config import load_config
 from app.core.llm.zhipu import ZhipuProvider
 from app.core.llm.base import ChatMessage, LLMProvider
@@ -96,13 +95,10 @@ async def test_provider_basic(provider: ZhipuProvider) -> None:
 
 
 async def main() -> int:
-    # 加载 .env
-    env_path = Path(__file__).parent.parent / ".env"
-    load_dotenv(env_path)
-
+    # app.core.config 在 import 时已自动加载 .env
     if not os.getenv("ZHIPU_API_KEY") or os.getenv("ZHIPU_API_KEY") == "your_zhipu_api_key_here":
         print("[FAIL] ZHIPU_API_KEY 未设置，无法进行 API 测试")
-        print(f"       请编辑 {env_path}")
+        print(f"       请编辑 .env 文件填入 API key")
         return 1
 
     try:

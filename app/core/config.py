@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel
 
 
@@ -88,5 +89,10 @@ def load_config(config_path: Path | None = None) -> LLMConfig:
 
 # 模块级单例：进程启动时加载一次，全局复用。
 # Python 没有 Spring 的 @Autowired，但模块级变量就是天然的全局单例。
-# 注意：这意味着 .env 必须在 import 这个模块前加载（dotenv.load_dotenv()）。
+#
+# 自动加载 .env：模块被 import 时即加载项目根目录的 .env，
+# 这样业务代码（包括 scripts/ 下的脚本）不用每次手动调 load_dotenv()。
+# dotenv 检测到 .env 不存在时静默跳过——所以 Docker / k8s 部署时
+# 用真环境变量也不会出错。load_dotenv() 默认不覆盖已设置的环境变量。
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 config = load_config()

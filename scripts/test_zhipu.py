@@ -22,20 +22,21 @@ if sys.platform == "win32":
 # 第一个parent表示当前文件的文件夹scripts，第二个表示再上一级的根目录，0表示放入索引首部
 sys.path.insert(0, str(Path(__file__).parent.parent)) 
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: F401  # 占位保留：app.core.config 已自动加载 .env
 from zhipuai import ZhipuAI
+
+# env_path 仅用于错误提示
+ENV_PATH = Path(__file__).parent.parent / ".env"
 
 
 def main() -> int:
-    # 加载 .env
-    # 重载了运算符‘/’优雅拼接路径
-    env_path = Path(__file__).parent.parent / ".env" 
-    load_dotenv(env_path) # 加载env到环境变量
+    # 触发 app.core.config 自动加载 .env（库代码统一入口）
+    from app.core.config import config  # noqa: F401
 
-    api_key = os.getenv("ZHIPU_API_KEY") # 使用环境变量通过key得到value
+    api_key = os.getenv("ZHIPU_API_KEY")  # 使用环境变量通过key得到value
     if not api_key or api_key == "your_zhipu_api_key_here":
         print("❌ 错误：未设置 ZHIPU_API_KEY")
-        print(f"   请编辑 {env_path} 填入你的 API key")
+        print(f"   请编辑 {ENV_PATH} 填入你的 API key")
         print("   注册地址：https://bigmodel.cn/")
         return 1
 
