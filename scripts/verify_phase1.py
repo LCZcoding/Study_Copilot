@@ -21,7 +21,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent)) # import可以搜索路径包括到根目录
 
 # app.core.config 导入时自动加载 .env，无需手动 load_dotenv
 from app.core.config import load_config
