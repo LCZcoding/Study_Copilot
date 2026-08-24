@@ -32,7 +32,7 @@ class StudyCopilotRetriever:
         # 把 LangChain 的 Embeddings 实例传进去，LangChain 会用它做需要 embed 的地方
         # （比如直接传文本搜索时）。我们 v0.1 主要用 search_by_vector，自己控制 embed。
         self.embedding = embedding
-        self.vector_store = InMemoryVectorStore(embedding=embedding)
+        self.vector_store = InMemoryVectorStore(embedding=embedding) # 内存存储，可以比较方便的修改为数据库
         # 记录已添加的 chunk 数量，方便调试和单元测试断言。
         self._count = 0
 
