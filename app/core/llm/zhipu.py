@@ -48,7 +48,7 @@ class ZhipuProvider(LLMProvider):
 
         # Pydantic 模型的 .model_dump() 类似 Java record 的 accessor，把对象转成 dict。
         # 智谱 SDK 要求传入 OpenAI 兼容格式：[{"role": "...", "content": "..."}]
-        msg_dicts = [m.model_dump() for m in messages]
+        msg_dicts = [m.model_dump() for m in messages] #对象转换为dict字典
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -62,14 +62,15 @@ class ZhipuProvider(LLMProvider):
         # 但 async 关键字让上层 await 调用方语法统一，业务代码不用分同步/异步两套。
         latency_ms = int((time.time() - start) * 1000)
 
-        choice = response.choices[0]
+        choice = response.choices[0] # 第一个候选回复
         # usage 可能为 None（极端情况），用 or {} 兜底。
-        usage = response.usage or {}
+        usage = response.usage or {} # usage智谱源码，输入token、对话token、总token
 
         return ChatResponse(
             content=choice.message.content,
             model=self.model,
-            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            # 获取usage中的prompt_tokens属性
+            input_tokens=getattr(usage, "prompt_tokens", 0) or 0, 
             output_tokens=getattr(usage, "completion_tokens", 0) or 0,
             # GLM-4-Flash 完全免费，所以成本永远是 0。
             cost_cny=0.0,
@@ -85,7 +86,7 @@ class ZhipuProvider(LLMProvider):
         """流式对话：每生成一段就 yield 一段。
 
         用法：
-            async for chunk in provider.stream_chat(messages):
+            async for chunk in provider.stream_chat(messages): 异步循环，io耗时输出时，能去干别的
                 print(chunk, end="", flush=True)
 
         Java 类比：返回 SSE（Server-Sent Events）的客户端流，类似 WebClient 的 bodyToFlux。
@@ -103,7 +104,7 @@ class ZhipuProvider(LLMProvider):
             delta = chunk.choices[0].delta
             if delta and delta.content:
                 # yield 是 Python 生成器的关键字，类似 Java 的 Flux.create(sink -> sink.next())。
-                yield delta.content
+                yield delta.content # yield 执行到这里直接返回 delta.content 保障流式输出
 
     async def check_health(self) -> bool:
         """健康检查：发个最小请求"ping"，能成功就说明服务可用。
@@ -121,6 +122,7 @@ class ZhipuProvider(LLMProvider):
             # 实际项目应记录日志，方便排查（v1.0+ 加 logger）。
             return False
 
+    # 不需要 async标记，应为不是耗时io操作
     def estimate_cost(self, messages: List[ChatMessage]) -> float:
         """预估成本。GLM-4-Flash 完全免费，永远返回 0。
 
