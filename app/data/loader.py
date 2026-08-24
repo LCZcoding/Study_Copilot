@@ -46,7 +46,7 @@ def load_document(content: bytes, filename: str) -> str:
 
     Java 类比：类似策略模式 + 工厂方法，根据文件类型选择不同的 Parser。
     """
-    suffix = Path(filename).suffix.lower()
+    suffix = Path(filename).suffix.lower() # suffix返回扩展名，包含‘.’
 
     if suffix == ".pdf":
         return _load_pdf(content)
@@ -72,9 +72,9 @@ def _load_pdf(content: bytes) -> str:
 
     # 逐页抽取，用换行符连接。Java 类比：类似拼接 PDFTextStripper 的输出。
     pages: list[str] = []
-    for i, page in enumerate(reader.pages):
+    for i, page in enumerate(reader.pages): # enumerate同时获取元素的“索引（下标）”和“元素值”。
         page_text = page.extract_text() or ""
-        if page_text.strip():
+        if page_text.strip(): # 去除空格换行制表符
             pages.append(page_text)
         # 空页（纯图片）静默跳过，不报错——v0.1 不支持 OCR，扫描版 PDF 会得到空文本
 
