@@ -1,0 +1,48 @@
+# 当前启用的 Provider
+providers:
+  - name: zhipu
+    type: chat
+    impl: ZhipuProvider
+    enabled: true
+    priority: 1
+    config:
+      api_key: ${ZHIPU_API_KEY}
+      model: glm-4-flash
+      cost_per_1m_input: 0.0    # 完全免费
+      cost_per_1m_output: 0.0   # 完全免费
+
+  # === v0.5 启用（智谱 fallback） ===
+  # - name: qwen_turbo
+  #   type: chat
+  #   impl: QwenTurboProvider
+  #   enabled: false
+  #   priority: 2
+  #   config:
+  #     api_key: ${QWEN_API_KEY}
+  #     model: qwen-turbo
+  #     cost_per_1m_input: 0.3
+  #     cost_per_1m_output: 0.6
+
+  # === v1.0 启用（长文本专用） ===
+  # - name: qwen_long
+  #   type: chat
+  #   impl: QwenLongProvider
+  #   enabled: false
+  #   priority: 3
+  #   config:
+  #     api_key: ${QWEN_API_KEY}
+  #     model: qwen-long
+  #     cost_per_1m_input: 0.5
+  #     cost_per_1m_output: 1.0
+
+# Embedding 配置
+embeddings:
+  - name: siliconflow_bge
+    type: embedding
+    impl: SiliconFlowBGEProvider
+    enabled: true
+    config:
+      api_key: ${SILICONFLOW_API_KEY}
+      base_url: https://api.siliconflow.cn/v1
+      model: BAAI/bge-m3
+      cost_per_1m_tokens: 0.1
