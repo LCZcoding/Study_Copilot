@@ -54,6 +54,9 @@ class LLMProvider(ABC):
 
     # 类属性：provider 的标识名。子类应覆盖它，如 "zhipu"、"qwen_turbo"。
     name: str = "abstract"
+    # 调度优先级：数字越小优先级越高。Router 用它排序。
+    # v0.5 默认：智谱=1（免费优先）、qwen_turbo=2（付费兜底）。
+    priority: int = 1
 
     @abstractmethod # 必须实现的抽象方法
     async def chat( # 异步，提前返回结果
