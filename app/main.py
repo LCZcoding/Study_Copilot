@@ -16,7 +16,7 @@ from fastapi import FastAPI
 
 from app.api.chat import init_components, router as chat_router
 from app.core.config import config
-from app.core.llm.zhipu import ZhipuProvider
+from app.core.llm.factory import create_router
 from app.rag.embedder import SiliconFlowBGEEmbeddings
 from app.rag.retriever import StudyCopilotRetriever
 
@@ -39,19 +39,18 @@ async def lifespan(app: FastAPI):
     # Retriever：内存向量存储
     retriever = StudyCopilotRetriever(embedding=embedder)
 
-    # LLM：智谱 GLM-4-Flash（从配置读 api_key 和 model）
-    zhipu_cfg = next(p for p in config.providers if p.name == "zhipu")
-    llm = ZhipuProvider(
-        api_key=zhipu_cfg.config["api_key"],
-        model=zhipu_cfg.config["model"],
-    )
+    # LLM Router：多 provider，按 priority 调度（v0.5-1 启用）
+    # 当前启用：智谱（免费优先）+ qwen-turbo（付费兜底）
+    llm = create_router(config.providers)
 
     # 注入到 chat router 的模块级单例
     init_components(retriever=retriever, embedder=embedder, llm=llm)
 
     print("[startup] 组件初始化完成")
     print(f"  - Embedder: bge-m3 (SiliconFlow)")
-    print(f"  - LLM: {llm.model} (Zhipu)")
+    # Router 显示所有启用的 provider
+    provider_names = [f"{p.name}(p={p.priority})" for p in llm.providers]
+    print(f"  - LLM Router: {provider_names}")
     print(f"  - Retriever: in-memory (LangChain InMemoryVectorStore)")
 
     # 应用运行（yield 把控制权交给 FastAPI）

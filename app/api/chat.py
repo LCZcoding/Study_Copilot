@@ -12,7 +12,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.core.llm.base import ChatMessage
-from app.core.llm.zhipu import ZhipuProvider
+from app.core.llm.router import LLMRouter
 from app.data.loader import DocumentLoadError, load_document
 from app.rag.chunker import chunk_document
 from app.rag.embedder import SiliconFlowBGEEmbeddings
@@ -29,13 +29,13 @@ router = APIRouter() # 收集路由
 # 这些会在 lifespan 里被替换成真实实例（避免循环依赖）。
 _retriever: StudyCopilotRetriever | None = None
 _embedder: SiliconFlowBGEEmbeddings | None = None
-_llm: ZhipuProvider | None = None
+_llm: LLMRouter | None = None
 
 
 def init_components(
     retriever: StudyCopilotRetriever,
     embedder: SiliconFlowBGEEmbeddings,
-    llm: ZhipuProvider,
+    llm: LLMRouter,
 ) -> None:
     """lifespan 启动时调用此函数注入单例。"""
     global _retriever, _embedder, _llm

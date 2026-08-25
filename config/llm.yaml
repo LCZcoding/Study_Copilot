@@ -11,17 +11,17 @@ providers:
       cost_per_1m_input: 0.0    # 完全免费
       cost_per_1m_output: 0.0   # 完全免费
 
-  # === v0.5 启用（智谱 fallback） ===
-  # - name: qwen_turbo
-  #   type: chat
-  #   impl: QwenTurboProvider
-  #   enabled: false
-  #   priority: 2
-  #   config:
-  #     api_key: ${QWEN_API_KEY}
-  #     model: qwen-turbo
-  #     cost_per_1m_input: 0.3
-  #     cost_per_1m_output: 0.6
+  # === v0.5 启用（智谱失败兜底） ===
+  - name: qwen_turbo
+    type: chat
+    impl: QwenTurboProvider
+    enabled: true
+    priority: 2
+    config:
+      api_key: ${QWEN_API_KEY}
+      model: qwen-turbo
+      cost_per_1m_input: 0.3
+      cost_per_1m_output: 0.6
 
   # === v1.0 启用（长文本专用） ===
   # - name: qwen_long
