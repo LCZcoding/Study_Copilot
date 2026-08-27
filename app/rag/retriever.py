@@ -108,11 +108,22 @@ class StudyCopilotRetriever:
         self,
         query_vector: List[float],
         top_k: int = 3,
+        min_score: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """按向量相似度找 top-k 个文档片段。
 
         v0.5-2 改动：返回字段从 "source" 改为 "source_name",
         同时新增 "source_type" 和 "source_url" 字段。
+
+        v0.5-2 D ext 改动：新增 min_score 过滤。
+        召回阶段按 cosine 相似度排，低分的 chunk 通常"沾边但无关"，
+        喂给 LLM 会导致 LLM 抓到片段编造。低于 min_score 的直接丢弃，
+        让上层返 404 / "未找到相关"。
+
+        Args:
+            query_vector: 问题向量（已 embed）
+            top_k: 候选数（先取 top_k，再按 min_score 过滤）
+            min_score: 相似度阈值（None = 不过滤，bge-m3 实测 0.3-0.85 区间）
 
         Returns:
             列表，每项是 {
@@ -131,6 +142,10 @@ class StudyCopilotRetriever:
             embedding=query_vector,
             k=top_k,
         )
+
+        # v0.5-2 D ext：按 min_score 过滤（先用 top_k 拉够，再裁剪）
+        if min_score is not None:
+            results = [(d, s) for d, s in results if s >= min_score]
 
         # v0.5-2：展开 LangChain metadata 为完整 dict
         return [

@@ -16,7 +16,11 @@ from app.core.llm.router import LLMRouter
 from app.data.loader import DocumentLoadError, load_document
 from app.rag.chunker import chunk_document
 from app.rag.embedder import SiliconFlowBGEEmbeddings
-from app.rag.prompts import RAG_SYSTEM_PROMPT, RAG_USER_TEMPLATE
+from app.rag.prompts import (
+    RAG_SYSTEM_PROMPT_WITH_CONTEXT,
+    RAG_SYSTEM_PROMPT_NO_CONTEXT,
+    RAG_USER_TEMPLATE,
+)
 from app.rag.retriever import StudyCopilotRetriever
 from app.sources.file_upload import FileUploadConnector
 
@@ -60,6 +64,9 @@ class ChatRequest(BaseModel):
     """聊天请求体。"""
     question: str
     top_k: int = 3  # 检索几个相关片段
+    min_score: float = 0.3  # 相似度阈值（v0.5-2 D ext：低于此分视为未召回，触发 404）
+                        # bge-m3 实测短文档场景：0.3-0.4 区间区分"沾边"和"真正相关"
+                        # 0.5 阈值对中等以上文档合理，但对短文档（如 test_smoke 的 50 字符示例）会误杀
 
 
 class ChatResponse(BaseModel):
@@ -169,20 +176,32 @@ async def chat(req: ChatRequest):
     query_vector = await _embedder.aembed_query(req.question)
 
     # 2. 检索（v0.5-2 返回字段：source_type / source_name / source_url / chunk_id / score）
-    results = _retriever.search(query_vector, top_k=req.top_k)
+    # v0.5-2 D ext：传 min_score 过滤低分 chunk，避免"沾边但无关"召回导致 LLM 编造
+    results = _retriever.search(
+        query_vector, top_k=req.top_k, min_score=req.min_score,
+    )
     if not results:
-        # 空库或无相关结果
+        # 空库或无相关结果（包含"无 chunks 过阈值"的情况）
         if _retriever.count == 0:
             raise HTTPException(404, "没有找到相关文档，请先通过 /upload 上传文档")
-        raise HTTPException(404, "未找到与问题相关的内容")
+        raise HTTPException(
+            404,
+            f"未找到与问题相关的内容（min_score={req.min_score}）。"
+            f"可调低 min_score 或换个说法重试",
+        )
 
     # 3. 组装 Prompt
-    context = "\n\n---\n\n".join(r["text"] for r in results)
+    # v0.5-2 D ext：根据是否召回到相关 chunk 选不同 prompt
+    # - 召回到（results 非空）→ 严格基于参考资料
+    # - 没召回（results 空）→ 兜底通用知识 + 开头告知用户
+    if results:
+        context = "\n\n---\n\n".join(r["text"] for r in results)
+        system_prompt = RAG_SYSTEM_PROMPT_WITH_CONTEXT.format(context=context)
+    else:
+        system_prompt = RAG_SYSTEM_PROMPT_NO_CONTEXT
+
     messages = [
-        ChatMessage(
-            role="system",
-            content=RAG_SYSTEM_PROMPT.format(context=context),
-        ),
+        ChatMessage(role="system", content=system_prompt),
         ChatMessage(
             role="user",
             content=RAG_USER_TEMPLATE.format(question=req.question),
@@ -191,12 +210,18 @@ async def chat(req: ChatRequest):
 
     # 4. 调 LLM 生成答案
     response = await _llm.chat(messages)
+    answer = response.content
+
+    # v0.5-2 D ext：兜底模式必须开头告知用户。
+    # 用服务层强制加前缀（LLM 不 100% 遵守 prompt 时仍生效）。
+    if not results and not answer.startswith("未在知识库中找到"):
+        answer = "未在知识库中找到相关内容，以下是通用回答：\n\n" + answer
 
     # v0.5-2：去重 sources 时改用 source_name 字段（v0.1 用 source）
     sources = list(dict.fromkeys(r["source_name"] for r in results)) #字典key只能有一个
 
     return ChatResponse(
-        answer=response.content,
+        answer=answer,
         sources=sources,
     )
 
