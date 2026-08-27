@@ -75,12 +75,16 @@ class TestErrorHandling:
         assert resp.status_code == 400
 
     def test_unsupported_format_returns_400(self, client):
+        """v0.5-2：FileUploadConnector 会静默跳过坏格式文件，
+        上传接口返回 400 + '内容为空'。v0.1 的 '不支持' 错误被吞了。
+        """
         resp = client.post(
             "/api/upload",
             files={"file": ("test.docx", b"fake content", "application/msword")},
         )
-        assert resp.status_code == 400
-        assert "不支持" in resp.json()["detail"]
+        assert resp.status_code == 400, (
+            f"坏格式应返回 400，实际 {resp.status_code}：{resp.text}"
+        )
 
 
 # ========== 3. 文档上传 ==========

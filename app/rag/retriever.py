@@ -26,6 +26,10 @@ class StudyCopilotRetriever:
 
     Java 类比：类似 Spring 的 Repository 模式——业务代码调我们的接口，
     底层可以换实现（FAISS / PGVector / Milvus）而业务代码不变。
+
+    v0.5-2 扩展：支持多文档管理
+    - list_sources()：返回所有已索引的文档源
+    - delete_source()：按 source 删除所有 chunks
     """
 
     def __init__(self, embedding: Embeddings):
@@ -35,6 +39,10 @@ class StudyCopilotRetriever:
         self.vector_store = InMemoryVectorStore(embedding=embedding) # 内存存储，可以比较方便的修改为数据库
         # 记录已添加的 chunk 数量，方便调试和单元测试断言。
         self._count = 0
+        # v0.5-2 新增：按 source 索引 LangChain 的 chunk ID
+        # 为什么要这个：delete_source 需要知道"这个 source 有哪些 chunk"，才能批量删
+        # 结构：{"file:raft.pdf": ["id_1", "id_2", ...], "feishu:xxx": [...]}
+        self._source_index: Dict[str, List[str]] = {}
 
     @property
     def count(self) -> int:
@@ -48,8 +56,12 @@ class StudyCopilotRetriever:
     ) -> None:
         """把切好的文档片段（已 embed）加入向量库。
 
+        v0.5-2 改动：chunks 字典结构变了——
+        旧：{"id": int, "text": str, "source": str}
+        新：{"id": int, "text": str, "source_type": str, "source_name": str, ...}
+
         Args:
-            chunks: 来自 chunker.chunk_document() 的输出，格式 [{"id": int, "text": str}, ...]
+            chunks: 来自 chunker.chunk_document() 的输出（v0.5-2 多了 meta 字段）
             vectors: 与 chunks 一一对应的 1024 维向量，来自 embedder.embed_documents()
 
         Raises:
@@ -62,26 +74,35 @@ class StudyCopilotRetriever:
         if not chunks:
             return
 
-        # 转成 LangChain 的 Document 对象。metadata 用来存 source 和 chunk_id，
-        # 检索时能从 Document 里拿回这些信息用于溯源（告诉用户答案来自哪个文件哪一段）。
-        documents = [
-            Document(
-                page_content=c["text"],
-                metadata={
-                    "source": c.get("source", "unknown"),
-                    "chunk_id": c["id"],
-                },
-            )
+        # v0.5-2：从 chunk 字典抽取元数据，转成 LangChain metadata
+        # LangChain 要求 metadata 是 dict，所以我们手动构造
+        metadatas = [
+            {
+                "source_type": c.get("source_type", "file"),
+                "source_name": c.get("source_name", "unknown"),
+                "source_url": c.get("source_url"),
+                "sync_version": c.get("sync_version", 1),
+                "ingested_at": c.get("ingested_at"),
+                "chunk_id": c["id"],
+            }
             for c in chunks
         ]
+        texts = [c["text"] for c in chunks] #得到所有text存到列表
+
         # LangChain 的 add_texts 接受预计算的 embeddings 参数，避免重复 embed。
-        # embeddings 参数是 List[List[float]]，跟 vectors 一致。
-        self.vector_store.add_texts(
-            texts=[d.page_content for d in documents],
-            metadatas=[d.metadata for d in documents],
+        # 它返回每个 chunk 的内部 ID（UUID 形式），我们需要存起来用于后续删除。
+        ids = self.vector_store.add_texts(
+            texts=texts,
+            metadatas=metadatas,
             embeddings=vectors,
         )
-        self._count += len(documents)
+
+        # 更新 source 索引：每个 source_key 映射到它的所有 chunk ID
+        for chunk, chunk_id in zip(chunks, ids): # zip打包成元组
+            source_key = f"{chunk.get('source_type', 'file')}:{chunk.get('source_name', 'unknown')}"
+            self._source_index.setdefault(source_key, []).append(chunk_id)
+
+        self._count += len(chunks)
 
     def search(
         self,
@@ -90,30 +111,34 @@ class StudyCopilotRetriever:
     ) -> List[Dict[str, Any]]:
         """按向量相似度找 top-k 个文档片段。
 
-        Args:
-            query_vector: 用户问题的 1024 维向量（embedder.embed_query() 输出）
-            top_k: 返回几个最相关的片段
+        v0.5-2 改动：返回字段从 "source" 改为 "source_name",
+        同时新增 "source_type" 和 "source_url" 字段。
 
         Returns:
-            列表，每项是 {"text": str, "source": str, "chunk_id": int, "score": float}
-            按相似度从高到低排序（score 越大越相关，LangChain 用的是距离的负值或余弦值，详见内部注释）
+            列表，每项是 {
+                "text": str,
+                "source_type": str,
+                "source_name": str,
+                "source_url": str | None,
+                "chunk_id": int,
+                "score": float,
+            }
         """
         if self._count == 0:
             return []  # 空库直接返回空，不报错（调用方决定是否提示用户）
 
-        # similarity_search_with_score_by_vector 是 LangChain 的标准方法，
-        # 返回 List[Tuple[Document, float]]。第二个值是 score，
-        # LangChain 内部用的是"距离的负值"，数值越大越相似。
         results = self.vector_store.similarity_search_with_score_by_vector(
             embedding=query_vector,
             k=top_k,
         )
 
-        # 把 LangChain 的 Document 转成我们的 dict 格式，方便业务层使用。
+        # v0.5-2：展开 LangChain metadata 为完整 dict
         return [
             {
                 "text": doc.page_content,
-                "source": doc.metadata.get("source", "unknown"),
+                "source_type": doc.metadata.get("source_type", "file"),
+                "source_name": doc.metadata.get("source_name", "unknown"),
+                "source_url": doc.metadata.get("source_url"),
                 "chunk_id": doc.metadata.get("chunk_id", -1),
                 "score": float(score),
             }
@@ -137,6 +162,61 @@ class StudyCopilotRetriever:
         # LangChain 0.3 的 InMemoryVectorStore 没有直接 clear 方法，重新 new 一个最干净
         self.vector_store = InMemoryVectorStore(embedding=self.embedding)
         self._count = 0
+        self._source_index = {}
+
+    # ========== v0.5-2 多文档管理 ==========
+
+    def list_sources(self) -> List[Dict[str, Any]]:
+        """列出所有已索引的文档源。
+
+        Returns:
+            列表，每项是 {"source_key": str, "source_type": str, "source_name": str, "chunks": int}
+
+        调用方（如 documents API）拿到这个列表展示给用户。
+        """
+        result = []
+        for source_key, chunk_ids in self._source_index.items():
+            # source_key 格式是 "type:name"，拆开
+            parts = source_key.split(":", 1) # 1表示maxsplit，只切一个
+            if len(parts) == 2:
+                source_type, source_name = parts
+            else:
+                source_type, source_name = "unknown", source_key
+            result.append({
+                "source_key": source_key,
+                "source_type": source_type,
+                "source_name": source_name,
+                "chunks": len(chunk_ids),
+            })
+        return result
+
+    def delete_source(self, source_type: str, source_name: str) -> bool:
+        """按 source 删除所有 chunks。
+
+        Args:
+            source_type: 数据源类型（"file" / "feishu" / ...）
+            source_name: 数据源名称（文件名 / 飞书文档标题）
+
+        Returns:
+            True 表示成功删除，False 表示该 source 不存在
+
+        实现细节：调用 LangChain 的 delete(ids) 批量删除，再用 pop 清空索引。
+        """
+        source_key = f"{source_type}:{source_name}"
+        chunk_ids = self._source_index.pop(source_key, [])
+        if not chunk_ids:
+            return False  # 该 source 不存在
+
+        # 调 LangChain 的 delete 方法（InMemoryVectorStore 支持）
+        try:
+            self.vector_store.delete(ids=chunk_ids)
+        except AttributeError:
+            # 兼容：如果 LangChain 版本不支持 delete，整个库重建
+            self.clear()
+            return True
+
+        self._count -= len(chunk_ids)
+        return True
 
 
 # ========== 教学辅助：手写 numpy 实现（仅供学习，不被 retriever 使用） ==========

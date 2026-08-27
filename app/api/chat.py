@@ -18,6 +18,7 @@ from app.rag.chunker import chunk_document
 from app.rag.embedder import SiliconFlowBGEEmbeddings
 from app.rag.prompts import RAG_SYSTEM_PROMPT, RAG_USER_TEMPLATE
 from app.rag.retriever import StudyCopilotRetriever
+from app.sources.file_upload import FileUploadConnector
 
 
 router = APIRouter() # 收集路由
@@ -30,18 +31,22 @@ router = APIRouter() # 收集路由
 _retriever: StudyCopilotRetriever | None = None
 _embedder: SiliconFlowBGEEmbeddings | None = None
 _llm: LLMRouter | None = None
+# v0.5-2：文件上传数据源（HTTP 上传的文件暂存在这里）
+_file_connector: FileUploadConnector | None = None
 
 
 def init_components(
     retriever: StudyCopilotRetriever,
     embedder: SiliconFlowBGEEmbeddings,
     llm: LLMRouter,
+    file_connector: FileUploadConnector,
 ) -> None:
     """lifespan 启动时调用此函数注入单例。"""
-    global _retriever, _embedder, _llm
+    global _retriever, _embedder, _llm, _file_connector
     _retriever = retriever
     _embedder = embedder
     _llm = llm
+    _file_connector = file_connector
 
 
 def _require_initialized():
@@ -82,12 +87,13 @@ class HealthResponse(BaseModel):
 async def upload_document(file: UploadFile = File(...)):
     """上传文档（PDF / Markdown / TXT）并建立向量索引。
 
-    流程：
-        1. 读文件二进制
-        2. loader.load_document() → 纯文本
-        3. chunker.chunk_document() → 多个 chunk
-        4. embedder.embed_documents() → 1024 维向量
-        5. retriever.add_chunks() → 入库
+    v0.5-2 流程变化：
+    1. 读文件二进制 → 存到 FileUploadConnector（不仅是直接入库）
+    2. 调 connector.fetch_documents() 拿到所有待索引的 Document
+    3. 每个 Document → 切片 → embed → 入库
+
+    为什么改：v0.1 的"上传即入库"耦合了上传和索引，
+    v0.5-2 解耦后，文件上传跟后续飞书等数据源走同一条流水线。
     """
     _require_initialized()
 
@@ -95,33 +101,52 @@ async def upload_document(file: UploadFile = File(...)):
     content = await file.read()
     filename = file.filename or "unknown"
 
-    # 1. 加载文档
-    try:
-        text = load_document(content, filename)
-    except DocumentLoadError as e:
-        raise HTTPException(400, f"文档解析失败：{e}")
+    # 1. 把上传的文件存到 FileUploadConnector
+    _file_connector.add_file(filename, content)
 
-    if not text.strip():
-        raise HTTPException(400, "文档内容为空")
+    # 2. 从 connector 拿所有文档（v0.5-2 简化为只返回刚加的那个，
+    # 但接口上跟"全量同步"一致，方便后续接飞书）
+    documents = await _file_connector.fetch_documents()
 
-    # 2. 切片
-    chunks = chunk_document(text, chunk_size=500, overlap=50)
-    if not chunks:
-        raise HTTPException(400, "文档切片后为空（可能文档太短或全是空白）")
+    # 3. 文档切片 → embed → 入库
+    total_chars = 0
+    total_chunks = 0
+    for doc in documents:
+        text = doc.text
+        total_chars += len(text)
 
-    # 3. Embedding（用 LangChain 的 aembed_documents，自动分批）
-    # lc自动分批发送http请求，哪里看出来用了lc
-    vectors = await _embedder.aembed_documents([c["text"] for c in chunks])
+        # 切片
+        chunks = chunk_document(text, chunk_size=500, overlap=50)
+        if not chunks:
+            continue
 
-    # 4. 入库（带 metadata：source 和 chunk_id 用于溯源）
-    chunks_with_source = [
-        {**c, "source": filename} for c in chunks # **c 解包c后 附加source字段，给字典增加字段
-    ]
-    _retriever.add_chunks(chunks_with_source, vectors)
+        # 加 meta 字段（v0.5-2 多源 metadata 已经在 doc.meta 里）
+        chunks_with_meta = []
+        for c in chunks:
+            chunks_with_meta.append({
+                **c,
+                "source_type": doc.meta.source_type,
+                "source_name": doc.meta.source_name,
+                "source_url": doc.meta.source_url,
+                "sync_version": doc.meta.sync_version,
+                "ingested_at": doc.meta.ingested_at,
+            })
+
+        # Embedding
+        vectors = await _embedder.aembed_documents(
+            [c["text"] for c in chunks_with_meta]
+        )
+
+        # 入库
+        _retriever.add_chunks(chunks_with_meta, vectors)
+        total_chunks += len(chunks)
+
+    if total_chunks == 0:
+        raise HTTPException(400, "文档内容为空或切片后为空")
 
     return UploadResponse(
-        chunks=len(chunks),
-        total_chars=len(text),
+        chunks=total_chunks,
+        total_chars=total_chars,
     )
 
 
@@ -143,7 +168,7 @@ async def chat(req: ChatRequest):
     # 1. Embedding 问题
     query_vector = await _embedder.aembed_query(req.question)
 
-    # 2. 检索
+    # 2. 检索（v0.5-2 返回字段：source_type / source_name / source_url / chunk_id / score）
     results = _retriever.search(query_vector, top_k=req.top_k)
     if not results:
         # 空库或无相关结果
@@ -167,8 +192,8 @@ async def chat(req: ChatRequest):
     # 4. 调 LLM 生成答案
     response = await _llm.chat(messages)
 
-    # 去重 sources（保留顺序）
-    sources = list(dict.fromkeys(r["source"] for r in results))
+    # v0.5-2：去重 sources 时改用 source_name 字段（v0.1 用 source）
+    sources = list(dict.fromkeys(r["source_name"] for r in results)) #字典key只能有一个
 
     return ChatResponse(
         answer=response.content,
