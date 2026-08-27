@@ -1,75 +1,97 @@
 # 飞书内容同步到 RAG
 
-v0.5-2 D ext：用飞书官方 [Lark CLI](https://www.feishu.cn/content/article/7623291503305083853) 把飞书 wiki 导出到本地，再通过 `/upload` 入库。
+v0.5-2 D ext：用飞书官方 [Lark CLI](https://github.com/larksuite/cli) 把飞书 wiki 导出到本地，再通过 `/upload` 入库。
 
 ## 为什么不用 OAuth
 
-飞书 OAuth 自建应用读个人 wiki 受 scope 限制（我们试过，JWT scope 只有 `auth:user.id:read`，不够）。
+飞书自建应用读个人 wiki 受 scope 限制（之前测过 JWT 只有 `auth:user.id:read`）。
 
-Lark CLI 是飞书官方绕路：用 CLI 客户端（飞书客户端本身有权限）做 OAuth，然后从命令行导出内容。我们只要消费导出的文件。
+Lark CLI 是飞书官方工具，OAuth 在 CLI 端解决（用户浏览器登录），我们只消费导出文件。
 
 ## 安装
 
 ```bash
-# 任选一种
-npm install -g @larksuite/cli
+# 方式 1（推荐）：npx
+npx @larksuite/cli@latest install
+
+# 方式 2：源码安装
+git clone https://github.com/larksuite/cli.git
+cd cli
+make install
+```
+
+## 首次配置
+
+按顺序跑（每个都看输出）：
+
+```bash
+# 1. 配置 app 凭据（输入你的 App ID / Secret）
+lark-cli config init
+
+# 2. 浏览器 OAuth 登录
+lark-cli auth login --recommend
+# 第一次会弹飞书登录页，同意授权
+
+# 3. 验证登录
+lark-cli auth status
+# 期望：{"ok": true, "identity": "user", ...}
+```
+
+## 验证能读你的 wiki
+
+```bash
+# 列 wiki spaces
+lark-cli wiki +list --format json --page-all
 # 或
-npx skills add larksuite/cli -y -g
+lark-cli wiki spaces list --format json
+
+# 看实际命令格式（如果上面的命令不对）
+lark-cli wiki --help
 ```
 
-第一次跑会让你浏览器登录飞书 OAuth。
+**期望**：列出你设为"企业公开"的那个 wiki 名字 + space_id。
 
-## 使用
-
-### 准备
-
-1. 我们的 RAG 服务在跑：`uv run python -m app.main`
-2. `.env` 配好了 `ZHIPU_API_KEY` 和 `SILICONFLOW_API_KEY`
-
-### 同步全部 wiki
+## 同步到 RAG
 
 ```bash
+# 跑我们的脚本
 uv run python scripts/sync_lark_to_rag.py
-```
 
-### 只同步特定 space
-
-```bash
-uv run python scripts/sync_lark_to_rag.py --space 7423456789 --space 7567abcdef
-```
-
-### 调试（只看不传）
-
-```bash
+# 调试（只看不传）
 uv run python scripts/sync_lark_to_rag.py --dry-run
-# 列出导出的文件，但不调 /upload
 ```
 
-### 指定服务地址
+脚本会：
+1. 调 `lark-cli wiki +list` 列 spaces
+2. 逐个 export 到 `./lark-exports/<space_name>/`
+3. 上传到 `http://localhost:8000/api/upload`
 
-```bash
-uv run python scripts/sync_lark_to_rag.py --service-url http://192.168.1.10:8000
-```
+## 常用命令参考
 
-## 工作流程
+| 命令 | 说明 |
+|---|---|
+| `lark-cli auth status` | 查当前登录 |
+| `lark-cli wiki --help` | 看 wiki 所有子命令 |
+| `lark-cli wiki +list` | 列 wiki（带 `+` 是快捷命令）|
+| `lark-cli wiki +export <id> --output <dir>` | 导出 wiki（具体命令以 --help 为准）|
 
-```
-Lark CLI（飞书客户端 OAuth）
-   ↓ 导出 wiki 到 ./lark-exports/<space_name>/*.md
-我们的脚本（sync_lark_to_rag.py）
-   ↓ 读文件 → POST /upload
-RAG 服务
-   ↓ chunk → embed → 入库
-```
+## 故障排查
+
+| 现象 | 原因 | 修法 |
+|---|---|---|
+| `wiki +list` 返空 | 个人 wiki 没设"企业公开" | 飞书后台 → wiki 设置 → 权限 → 设为企业公开 |
+| 报"权限不足" | Lark CLI scope 不够 | 重新跑 `lark-cli auth login --recommend` |
+| 报"App not found" | `lark-cli config init` 时输错了 App ID | 重新 init |
 
 ## 待办（v0.5-3+）
 
-- 定时调度（cron 或 APScheduler）
+- 定时调度（OS cron 或 APScheduler）
 - 增量检测（基于文件 mtime）
-- Lark CLI 命令格式 verify（装了后跑一次就知道实际命令）
-- Lark CLI 失败的 retry 逻辑
+- Lark CLI 失败 retry
 
 ## 相关
 
-- 飞书 CLI 官方介绍：https://www.feishu.cn/content/article/7623291503305083853
-- 我们的 v0.5-2 RAG 代码：`app/api/chat.py`、`app/rag/retriever.py`
+- [larksuite/cli GitHub](https://github.com/larksuite/cli)
+- [Lark CLI 官方博客](https://www.larksuite.com/en_us/blog/lark-cli)
+- [Lark CLI 文档](https://open.larksuite.com/document/mcp_open_tools/feishu-cli-let-ai-actually-do-your-work-in-feishu)
+- 我们的 RAG 代码：`app/api/chat.py`、`app/rag/retriever.py`
