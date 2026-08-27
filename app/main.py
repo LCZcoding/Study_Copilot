@@ -14,11 +14,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.chat import init_components, router as chat_router
+from app.api.chat import init_components as init_chat_components
+from app.api.chat import router as chat_router
+from app.api.documents import init_components as init_documents_components
+from app.api.documents import router as documents_router
 from app.core.config import config
 from app.core.llm.factory import create_router
 from app.rag.embedder import SiliconFlowBGEEmbeddings
 from app.rag.retriever import StudyCopilotRetriever
+from app.sources.file_upload import FileUploadConnector
 
 
 @asynccontextmanager
@@ -43,8 +47,14 @@ async def lifespan(app: FastAPI):
     # 当前启用：智谱（免费优先）+ qwen-turbo（付费兜底）
     llm = create_router(config.providers)
 
-    # 注入到 chat router 的模块级单例
-    init_components(retriever=retriever, embedder=embedder, llm=llm)
+    # v0.5-2：文件上传数据源
+    file_connector = FileUploadConnector()
+
+    # 注入到各 router 的模块级单例
+    init_chat_components(
+        retriever=retriever, embedder=embedder, llm=llm, file_connector=file_connector
+    )
+    init_documents_components(retriever=retriever)
 
     print("[startup] 组件初始化完成")
     print(f"  - Embedder: bge-m3 (SiliconFlow)")
@@ -52,6 +62,7 @@ async def lifespan(app: FastAPI):
     provider_names = [f"{p.name}(p={p.priority})" for p in llm.providers]
     print(f"  - LLM Router: {provider_names}")
     print(f"  - Retriever: in-memory (LangChain InMemoryVectorStore)")
+    print(f"  - FileUploadConnector: ready (v0.5-2)")
 
     # 应用运行（yield 把控制权交给 FastAPI）
     # lifespan 的核心是利用 Python 的异步上下文管理器 (asynccontextmanager) 和 yield 关键字。
@@ -74,6 +85,8 @@ app = FastAPI(
 
 # 注册路由
 app.include_router(chat_router, prefix="/api", tags=["chat"])
+# v0.5-2：多文档管理路由
+app.include_router(documents_router, prefix="/api", tags=["documents"])
 
 
 @app.get("/")
@@ -87,6 +100,8 @@ def root():
             "POST /api/upload": "上传文档（PDF/MD/TXT）",
             "POST /api/chat": "基于已上传文档问答",
             "GET /api/health": "健康检查",
+            "GET /api/documents": "列出所有已索引文档（v0.5-2）",
+            "DELETE /api/documents/{type}/{name}": "删除指定文档（v0.5-2）",
         },
     }
 
