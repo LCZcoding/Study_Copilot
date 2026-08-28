@@ -1,0 +1,140 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Late Night Library — 全局设计 token。
+ * 所有颜色都走 HSL，方便 shadcn/ui 调透明度。
+ * 只用 dark mode（PR1）；light mode 占位留给 PR2。
+ */
+@layer base {
+  :root {
+    /* 基础色：深夜台灯暖色调 */
+    --background: 24 18% 9%;           /* 深棕黑 #1a1614 */
+    --foreground: 35 33% 84%;          /* 暖米白 #e8dcc4 */
+    --card: 24 16% 12%;                /* 比 bg 浅一点 #211d1a */
+    --card-foreground: 35 33% 84%;
+    --muted: 24 14% 16%;               /* 深棕灰 #2d2723 */
+    --muted-foreground: 35 18% 65%;    /* 灰米色 */
+    --border: 28 14% 22%;              /* 浅棕灰 #3d352e */
+    --input: 24 14% 16%;
+    --ring: 32 50% 60%;                /* amber 焦点环 */
+
+    /* 品牌色 */
+    --primary: 32 50% 60%;             /* 琥珀 #d4a574 */
+    --primary-foreground: 24 18% 9%;
+    --secondary: 95 8% 47%;            /* 墨绿 #7a8471 */
+    --secondary-foreground: 35 33% 84%;
+    --accent: 14 53% 50%;              /* 砖红 #c45a3d */
+    --accent-foreground: 35 33% 84%;
+    --destructive: 0 62% 45%;
+    --destructive-foreground: 35 33% 84%;
+
+    --radius: 0.625rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html, body, #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1, "ss01" 1;
+    /* 细微纸张纹理：用 radial gradient 模拟 */
+    background-image:
+      radial-gradient(at 0% 0%, hsl(32 40% 18% / 0.4) 0px, transparent 50%),
+      radial-gradient(at 100% 100%, hsl(95 12% 22% / 0.3) 0px, transparent 50%);
+    background-attachment: fixed;
+  }
+
+  /* 滚动条：暖色调 */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: hsl(var(--background));
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted));
+    border-radius: 5px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--border));
+  }
+
+  /* 选中文字：amber 高亮 */
+  ::selection {
+    background: hsl(var(--primary) / 0.3);
+    color: hsl(var(--foreground));
+  }
+}
+
+@layer components {
+  /* 装饰用：纸张质感 + 渐变 */
+  .library-card {
+    @apply relative overflow-hidden bg-card/60 backdrop-blur-sm border border-border/50;
+  }
+  .library-card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      135deg,
+      hsl(var(--primary) / 0.04) 0%,
+      transparent 50%,
+      hsl(var(--secondary) / 0.04) 100%
+    );
+    pointer-events: none;
+  }
+}
+
+@layer utilities {
+  /* prose 自定义：暗色调的 markdown 渲染（不用 @tailwindcss/typography，
+     自己写基础样式保证配色一致） */
+  .prose-library {
+    @apply text-foreground leading-relaxed;
+  }
+  .prose-library p {
+    @apply my-3;
+  }
+  .prose-library code:not(pre code) {
+    @apply px-1.5 py-0.5 rounded bg-muted text-primary font-mono text-[0.9em];
+  }
+  .prose-library pre {
+    @apply my-4 p-4 rounded-lg bg-muted border border-border overflow-x-auto;
+  }
+  .prose-library pre code {
+    @apply font-mono text-sm text-foreground;
+  }
+  .prose-library strong {
+    @apply font-semibold text-foreground;
+  }
+  .prose-library em {
+    @apply italic text-secondary-foreground;
+  }
+  .prose-library ul, .prose-library ol {
+    @apply my-3 pl-6;
+  }
+  .prose-library ul { @apply list-disc; }
+  .prose-library ol { @apply list-decimal; }
+  .prose-library li {
+    @apply my-1;
+  }
+  .prose-library a {
+    @apply text-primary underline underline-offset-2 hover:text-primary/80;
+  }
+  .prose-library blockquote {
+    @apply border-l-4 border-accent pl-4 my-3 italic text-muted-foreground;
+  }
+  .prose-library h1, .prose-library h2, .prose-library h3 {
+    @apply font-display font-semibold text-foreground mt-6 mb-3;
+  }
+  .prose-library h1 { @apply text-2xl; }
+  .prose-library h2 { @apply text-xl; }
+  .prose-library h3 { @apply text-lg; }
+}
