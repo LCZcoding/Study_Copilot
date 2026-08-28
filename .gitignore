@@ -43,3 +43,6 @@ logs/
 
 # 飞书导出（本地数据，不进 git）
 lark-exports/
+
+# Claude Code 本地配置（不进 git）
+.claude/

@@ -13,6 +13,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import init_components as init_chat_components
 from app.api.chat import router as chat_router
@@ -87,6 +88,19 @@ app = FastAPI(
 app.include_router(chat_router, prefix="/api", tags=["chat"])
 # v0.5-2：多文档管理路由
 app.include_router(documents_router, prefix="/api", tags=["documents"])
+
+# v0.5-3 PR1：允许 Vite dev server (localhost:5173) 跨域调 API。
+# 生产环境部署到同源时这条不影响；分域部署时把生产域名也加进去。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",  # Vite dev
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
