@@ -24,12 +24,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
 
   if (!res.ok) {
-    let message = res.statusText
+    // Read body once (Response body is a stream — can't read twice).
+    // Try JSON first, fall back to text, finally to statusText.
+    const text = await res.text()
+    let message = res.statusText || "Unknown error"
     try {
-      const body = await res.json()
-      message = body.detail || body.message || message
+      const body = JSON.parse(text)
+      message = body.detail || body.message || text || message
     } catch {
-      // 响应不是 JSON，用 statusText
+      // not JSON — use raw text if non-empty
+      if (text) message = text
     }
     throw new APIError(res.status, message)
   }
