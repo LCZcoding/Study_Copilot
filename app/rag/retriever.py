@@ -1,24 +1,33 @@
-"""向量检索器：在内存中存文档向量，按相似度找 top-k。
+"""向量检索器：内存检索 + SQLite 持久化，按相似度找 top-k。
 
-设计选择：用 LangChain 的 `InMemoryVectorStore`（企业级标准）做底层存储，
-上面包一层我们的 domain 类，方便业务代码调用、隐藏 LangChain 的 API 细节。
-
-为什么 v0.1 用 LangChain 而不自己写 numpy？
-- LangChain 是 AI 应用的事实标准接口（跟 Phase 1 用 LangChain Embeddings 配套）
-- 自己写 numpy 检索 < 50 行能搞定，但 v0.5+ 接 PGVector 时 LangChain 抽象直接复用
-- numpy 实现的"学习价值"在 verify_phase3.py 里保留：手写一遍 + 对比 LangChain 结果
+设计决策：
+- 底层用 InMemoryVectorStore 做内存检索（启动后毫秒级响应）
+- 通过 SQLite 做磁盘持久化（重启不丢数据，增量同步友好）
+  → 启动时从 SQLite 全量加载到内存，检索走内存
+  → 写入/删除时同步操作 SQLite + 内存，保持两者一致
+- 不用 sqlite-vec：几千向量规模下内存检索已到硬件极限，省不了
 
 数据流：
-    上传文档 → 切片 → embedder.embed_documents(chunks) → retriever.add_chunks(chunks, vectors)
-    用户提问 → embedder.embed_query(question) → retriever.search(query_vector, top_k=3)
+    上传 → chunker → embedder → add_chunks（写内存 + 写 SQLite）
+    提问 → embedder.embed_query → search（只读内存）
+    重启 → __init__ 从 SQLite 加载到内存 → 跳过 embed
 """
 
+import sqlite3
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 import numpy as np
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import InMemoryVectorStore
+
+# ========== 持久化路径 ==========
+# SQLite 数据库存放位置。
+# 为什么需要持久化：InMemoryVectorStore 重启即丢数据，每次启动都要重新
+# 调 SiliconFlow API 做 embedding（又慢又花钱）。
+# SQLite 只做磁盘备份，检索仍在内存里做——启动时全量加载到 InMemoryVectorStore。
+_DB_PATH = Path("data/rag.db")
 
 
 class StudyCopilotRetriever:
@@ -32,11 +41,89 @@ class StudyCopilotRetriever:
     - delete_source()：按 source 删除所有 chunks
     """
 
+    def _db_init(self) -> None:
+        """初始化 SQLite 数据库：建目录 + 建表 + 建索引。
+
+        幂等操作——重复调用不会报错也不会丢数据。
+        IF NOT EXISTS 保证表已存在时跳过。
+        """
+        # data/ 目录可能不存在，SQLite 不会自动建父目录，必须手动建
+        # # parents=True：连父目录一起建（类似 mkdir -p）
+        # # exist_ok=True：目录已存在时不报错
+        _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        # connect 时如果 .db 文件不存在，SQLite 会自动创建空数据库
+        conn = sqlite3.connect(_DB_PATH)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS chunks (
+            id           TEXT PRIMARY KEY,
+            source_type  TEXT NOT NULL,
+            source_name  TEXT NOT NULL,
+            source_url   TEXT,
+            chunk_id     INTEGER,
+            text         TEXT NOT NULL,
+            vector       BLOB NOT NULL,
+            ingested_at  TEXT
+        )
+    """)
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_source
+        ON chunks(source_type, source_name)
+    """)
+
+        conn.commit()
+        conn.close()
+
+    def _db_save_chunks(
+        self,
+        chunks: List[Dict[str, Any]],
+        vectors: List[List[float]],
+        ids: List[str],
+    ) -> None:
+        """把 add_chunks 的数据同步写入 SQLite。
+
+        Args:
+            chunks: 同 add_chunks 的 chunks 参数
+            vectors: 与 chunks 一一对应的向量
+            ids: LangChain add_texts 返回的 UUID 列表
+                （内存库和 SQLite 的关联键，delete_source 靠它对齐两边）
+
+        实现细节：executemany 批量插入 + commit 是一个事务，
+        中途崩溃会整体回滚，不会写一半。
+        """
+        rows = []
+        for chunk, vector, lc_id in zip(chunks, vectors, ids):
+            # 向量序列化：list[float] → float32 bytes（省 5 倍空间）
+            vector_blob = np.array(vector, dtype=np.float32).tobytes()
+            rows.append(
+                (
+                    lc_id,                                  # id（LangChain UUID）
+                    chunk.get("source_type", "file"),       # source_type
+                    chunk.get("source_name", "unknown"),    # source_name
+                    chunk.get("source_url"),                # source_url
+                    chunk["id"],                            # chunk_id（chunker 序号）
+                    chunk["text"],                          # text
+                    vector_blob,                            # vector（BLOB）
+                    chunk.get("ingested_at"),               # ingested_at
+                )
+            )
+        conn = sqlite3.connect(_DB_PATH)
+        try : 
+            # INSERT OR REPLACE：同 id 重复写入时覆盖（幂等），不会主键冲突报错 
+            conn.executemany( "INSERT OR REPLACE INTO chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?)" ,
+                rows,
+            )
+            conn.commit() 
+        finally :
+            conn.close()  
+
     def __init__(self, embedding: Embeddings):
         # 把 LangChain 的 Embeddings 实例传进去，LangChain 会用它做需要 embed 的地方
         # （比如直接传文本搜索时）。我们 v0.1 主要用 search_by_vector，自己控制 embed。
         self.embedding = embedding
-        self.vector_store = InMemoryVectorStore(embedding=embedding) # 内存存储，可以比较方便的修改为数据库
+        self.vector_store = InMemoryVectorStore(
+            embedding=embedding
+        )  # 内存存储，可以比较方便的修改为数据库
         # 记录已添加的 chunk 数量，方便调试和单元测试断言。
         self._count = 0
         # v0.5-2 新增：按 source 索引 LangChain 的 chunk ID
@@ -54,18 +141,15 @@ class StudyCopilotRetriever:
         chunks: List[Dict[str, Any]],
         vectors: List[List[float]],
     ) -> None:
-        """把切好的文档片段（已 embed）加入向量库。
-
-        v0.5-2 改动：chunks 字典结构变了——
-        旧：{"id": int, "text": str, "source": str}
-        新：{"id": int, "text": str, "source_type": str, "source_name": str, ...}
+        """将已 embed 的文档片段加入向量库。
 
         Args:
-            chunks: 来自 chunker.chunk_document() 的输出（v0.5-2 多了 meta 字段）
-            vectors: 与 chunks 一一对应的 1024 维向量，来自 embedder.embed_documents()
+            chunks: 来自 chunker.chunk_document() 的输出，
+                必须包含 "id"、"text"、"source_type"、"source_name" 字段。
+            vectors: 与 chunks 一一对应的向量，长度必须与 chunks 相同。
 
         Raises:
-            ValueError: chunks 和 vectors 数量不一致
+            ValueError: chunks 与 vectors 长度不一致。
         """
         if len(chunks) != len(vectors):
             raise ValueError(
@@ -73,6 +157,19 @@ class StudyCopilotRetriever:
             )
         if not chunks:
             return
+        
+        # 新增：先删后加——同 source 重复上传时覆盖旧版 
+        # 场景：飞书文档改了一版，重新 sync → upload → add_chunks 
+        # 不删的话旧 chunks 留在库里（SQLite 重启不清空）， 
+        # 检索可能召回到过时内容——这不是浪费空间，是检索质量劣化
+        first = chunks[0]
+        source_type = first.get("source_type", "file")
+        source_name = first.get("source_name", "unknown")
+        source_key = f"{source_type}:{source_name}"
+        if source_key in self._source_index:
+            # 已有同名 source：先删旧 chunks，再加新的 
+            # （delete_source 下一步会改造成同时删内存 + SQLite）
+            self.delete_source(source_type, source_name)
 
         # v0.5-2：从 chunk 字典抽取元数据，转成 LangChain metadata
         # LangChain 要求 metadata 是 dict，所以我们手动构造
@@ -87,7 +184,7 @@ class StudyCopilotRetriever:
             }
             for c in chunks
         ]
-        texts = [c["text"] for c in chunks] #得到所有text存到列表
+        texts = [c["text"] for c in chunks]  # 得到所有text存到列表
 
         # LangChain 的 add_texts 接受预计算的 embeddings 参数，避免重复 embed。
         # 它返回每个 chunk 的内部 ID（UUID 形式），我们需要存起来用于后续删除。
@@ -98,11 +195,15 @@ class StudyCopilotRetriever:
         )
 
         # 更新 source 索引：每个 source_key 映射到它的所有 chunk ID
-        for chunk, chunk_id in zip(chunks, ids): # zip打包成元组
+        for chunk, chunk_id in zip(chunks, ids):  # zip打包成元组
             source_key = f"{chunk.get('source_type', 'file')}:{chunk.get('source_name', 'unknown')}"
             self._source_index.setdefault(source_key, []).append(chunk_id)
 
         self._count += len(chunks)
+        # 新增：同步写 SQLite（磁盘持久化） 
+        # 传 ids：LangChain UUID 是内存库主键，SQLite 用同一个值做主键， 
+        # delete_source 时才能两边一起删 
+        self._db_save_chunks(chunks, vectors, ids)
 
     def search(
         self,
@@ -192,17 +293,19 @@ class StudyCopilotRetriever:
         result = []
         for source_key, chunk_ids in self._source_index.items():
             # source_key 格式是 "type:name"，拆开
-            parts = source_key.split(":", 1) # 1表示maxsplit，只切一个
+            parts = source_key.split(":", 1)  # 1表示maxsplit，只切一个
             if len(parts) == 2:
                 source_type, source_name = parts
             else:
                 source_type, source_name = "unknown", source_key
-            result.append({
-                "source_key": source_key,
-                "source_type": source_type,
-                "source_name": source_name,
-                "chunks": len(chunk_ids),
-            })
+            result.append(
+                {
+                    "source_key": source_key,
+                    "source_type": source_type,
+                    "source_name": source_name,
+                    "chunks": len(chunk_ids),
+                }
+            )
         return result
 
     def delete_source(self, source_type: str, source_name: str) -> bool:
