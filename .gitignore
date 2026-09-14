@@ -46,3 +46,6 @@ lark-exports/
 
 # Claude Code 本地配置（不进 git）
 .claude/
+
+# SQLite 向量库（本地持久化数据，不进 git）
+data/

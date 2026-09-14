@@ -15,8 +15,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-
-
+#from app.api.chat import _retriever
+import app.api.chat as chat_api
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
@@ -24,14 +24,12 @@ FIXTURES = Path(__file__).parent / "fixtures"
 @pytest.fixture(scope="module")
 def client():
     """FastAPI TestClient（进程内 HTTP 测试）。
-
-    module scope：整个文件共享一个 client + lifespan。
-    - 启动一次 lifespan（避免每个测试都重新初始化 embedder/retriever/llm）
-    - 所有测试共享同一份向量索引（accumulate 状态）
-
-    Java 类比：类似 Spring TestContext 的 @TestInstance(Lifecycle.PER_CLASS)。
     """
     with TestClient(app) as c:
+        # 持久化后：SQLite 会残留上一轮运行的数据， 
+        # lifespan load 进内存会污染测试（如 TestStrictRAG 的空库假设）。 
+        # 每轮测试开始前清库，保证从干净状态开始。
+        chat_api._retriever.clear()
         yield c
 
 
@@ -66,6 +64,7 @@ class TestErrorHandling:
         所以我们额外用 fresh client 来验证'空库'场景。
         """
         with TestClient(app) as fresh:
+            chat_api._retriever.clear() # fresh client 是新实例，同样要清残留
             resp = fresh.post("/api/chat", json={"question": "什么是 Raft？"})
             assert resp.status_code == 404
             assert "请先" in resp.json()["detail"]
@@ -173,6 +172,7 @@ class TestStrictRAG:
     def test_no_fallback_to_llm_knowledge(self):
         """上传 Python 文档，问 Raft 问题，不应幻觉 Raft 内容。"""
         with TestClient(app) as fresh_client:
+            chat_api._retriever.clear() # 清掉 module client 遗留的测试数据
             # 1. 上传完全不相关的文档
             python_content = (
                 "Python 是一门解释型、面向对象、动态数据类型的高级程序设计语言。"

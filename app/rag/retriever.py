@@ -116,20 +116,89 @@ class StudyCopilotRetriever:
             conn.commit() 
         finally :
             conn.close()  
+    def _db_delete_source(self, source_type: str, source_name: str) ->int:
+        """从 SQLite 删除指定 source 的所有行。
 
+        Returns:
+            删除的行数（cursor.rowcount），调试用
+
+        为什么按 (source_type, source_name) 删，而不是传 id 列表：
+            _db_init 建的联合索引 idx_source 正好覆盖这两列，
+            DELETE 直接走索引定位，不需要把内存里的 id 列表拼进 SQL。
+        """
+    def _db_load_all(self) ->int:
+        """启动时从 SQLite 全量加载 chunks 到内存向量库。
+
+        Returns:
+            加载的 chunk 数
+
+        关键实现：直接写 vector_store.store 字典，绕过 add_texts。
+        为什么不用 add_texts：它会重新生成 UUID，和 SQLite 存的 id
+        对不上，delete_source 时两边就删不一致了。
+        恢复的语义是"拿回原来的东西"，不是"新增"。
+
+        store 结构（LangChain 内部约定）：
+            {id: {"id", "vector", "text", "metadata"}}
+        """
+        conn = sqlite3.connect(_DB_PATH)
+        try:
+            cursor = conn.execute("SELECT id, source_type, source_name, source_url, "
+                                   "chunk_id, text, vector, ingested_at FROM chunks")
+            rows = cursor.fetchall()
+        finally:
+            conn.close()
+
+        for row in rows:
+            (lc_id, source_type, source_name, source_url,
+             chunk_id, text, vector_blob, ingested_at) = row
+            # 反序列化：BLOB → list[float]（和 _db_save_chunks 的 tobytes 对称）
+            vector = np.frombuffer(vector_blob, dtype=np.float32).tolist()
+
+            # 直接构造 LangChain 内部结构，id 保持 SQLite 里的原值
+            self.vector_store.store[lc_id] = {
+                "id": lc_id,
+                "vector": vector,
+                "text": text,
+                "metadata": {
+                    "source_type" : source_type, 
+                    "source_name" : source_name, 
+                    "source_url" : source_url, 
+                    #TODO SQLite 表没存 sync_version（业务目前不用），填默认值 
+                    "sync_version" : 1 , 
+                    "ingested_at" : ingested_at, 
+                    "chunk_id" : chunk_id,
+                }
+            }
+            # 重建 _source_index（和 add_chunks 里的逻辑相同）
+            source_key = f"{source_type}:{source_name}"
+            self._source_index.setdefault(source_key,[]).append(lc_id)
+        self._count = len(rows)
+        return self._count
+    
     def __init__(self, embedding: Embeddings):
-        # 把 LangChain 的 Embeddings 实例传进去，LangChain 会用它做需要 embed 的地方
-        # （比如直接传文本搜索时）。我们 v0.1 主要用 search_by_vector，自己控制 embed。
+        # 把 LangChain 的 Embeddings 实例传进去
         self.embedding = embedding
+
+        # 新增：初始化 SQLite（建目录 + 建表 + 建索引，幂等） 
+        # 必须在 _db_load_all 之前——表都没有，读什么
+        self._db_init()
+
+
         self.vector_store = InMemoryVectorStore(
             embedding=embedding
         )  # 内存存储，可以比较方便的修改为数据库
+
         # 记录已添加的 chunk 数量，方便调试和单元测试断言。
         self._count = 0
-        # v0.5-2 新增：按 source 索引 LangChain 的 chunk ID
+        # 新增：按 source 索引 LangChain 的 chunk ID
         # 为什么要这个：delete_source 需要知道"这个 source 有哪些 chunk"，才能批量删
         # 结构：{"file:raft.pdf": ["id_1", "id_2", ...], "feishu:xxx": [...]}
         self._source_index: Dict[str, List[str]] = {}
+        # 新增：从 SQLite 恢复历史数据，跳过重新 embed 
+        # 这就是"启动慢"问题的答案——重启不再调 SiliconFlow API
+        loaded = self._db_load_all()
+        if loaded > 0:
+            print(f"[retriever] 从 SQLite 恢复 {loaded} 个 chunks（跳过重新 embed）")
 
     @property
     def count(self) -> int:
@@ -274,11 +343,23 @@ class StudyCopilotRetriever:
         return self.search(query_vector, top_k=top_k)
 
     def clear(self) -> None:
-        """清空向量库（用于测试或多文档管理场景）。"""
-        # LangChain 0.3 的 InMemoryVectorStore 没有直接 clear 方法，重新 new 一个最干净
+        """清空向量库（内存 + SQLite 同步清，用于测试或重置场景）。
+
+        为什么必须两边都清：只清内存的话，SQLite 里的数据还在，
+        下次启动又 load 回来了——等于没清。
+        """
+        # 内存：重新 new 一个最干净
         self.vector_store = InMemoryVectorStore(embedding=self.embedding)
         self._count = 0
         self._source_index = {}
+        # 磁盘：清空 chunks 表 
+        # # DELETE 而不是删 .db 文件：保留表结构和索引，_db_init 不用重跑 
+        conn = sqlite3.connect(_DB_PATH) 
+        try :
+            conn.execute( "DELETE FROM chunks" )
+            conn.commit() 
+        finally :
+            conn.close()
 
     # ========== v0.5-2 多文档管理 ==========
 
@@ -309,16 +390,18 @@ class StudyCopilotRetriever:
         return result
 
     def delete_source(self, source_type: str, source_name: str) -> bool:
-        """按 source 删除所有 chunks。
+        """按 source 删除所有 chunks（内存 + SQLite 同步删）。
+
+        两个调用场景，行为一致：
+        - add_chunks 先删后加：删完旧的马上加新的
+        - DELETE /api/documents：用户手动删文档
 
         Args:
             source_type: 数据源类型（"file" / "feishu" / ...）
             source_name: 数据源名称（文件名 / 飞书文档标题）
 
         Returns:
-            True 表示成功删除，False 表示该 source 不存在
-
-        实现细节：调用 LangChain 的 delete(ids) 批量删除，再用 pop 清空索引。
+            True 表示删除成功，False 表示该 source 不存在
         """
         source_key = f"{source_type}:{source_name}"
         chunk_ids = self._source_index.pop(source_key, [])
@@ -326,14 +409,16 @@ class StudyCopilotRetriever:
             return False  # 该 source 不存在
 
         # 调 LangChain 的 delete 方法（InMemoryVectorStore 支持）
-        try:
-            self.vector_store.delete(ids=chunk_ids)
-        except AttributeError:
-            # 兼容：如果 LangChain 版本不支持 delete，整个库重建
-            self.clear()
-            return True
+        # try:
+        self.vector_store.delete(ids=chunk_ids)
+        # except AttributeError:
+        #     # 兼容：如果 LangChain 版本不支持 delete，整个库重建
+        #     self.clear()
+        #     return True
 
         self._count -= len(chunk_ids)
+        # 删 SQLite（磁盘同步）
+        self._db_delete_source(source_type, source_name)
         return True
 
 
