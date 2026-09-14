@@ -10,7 +10,8 @@ v0.5-2 D ext 简化（按之前教训不做太多）：
 - 不做增量检测
 - 不做 Lark CLI retry
 """
-
+import hashlib
+from datetime import datetime, timezone
 import argparse
 import json
 import os
@@ -124,7 +125,11 @@ class LarkCLI:
         - 退出码非 0 不一定是错——业务 ok:false 也可能用非零码（比如 126）
         """
         self._assert_bin_exists()
-        cmd = [self.lark_bin] + args
+        # 显式 --as user：同步脚本读的是"用户的" wiki/文档，bot 身份看不到
+        # 个人资源，且 bot 查用户资源会返回空成功而非报错（之前 0 个 space 的坑）。
+        # 显式指定后身份不再靠 CLI 自动选（defaultAs=auto 不可控），
+        # user token 过期时会明确抛 LarkCLIError 而不是静默空列表。
+        cmd = [self.lark_bin] + args + ["--as", "user"]
         try:
             proc = subprocess.run(
                 cmd,
@@ -368,6 +373,52 @@ _MIME_MAP = {
     ".txt": "text/plain",
 }
 
+# ========== 增量同步状态（v0.6 新增） ==========
+
+# manifest 记录"上次同步时每篇文档的内容指纹"。
+# 增量同步核心：fetch 内容后算 hash 和 manifest 比——
+# 没变 → 跳过 upload（省掉重新 embed 的 API 调用）
+# 变了 → upload（服务端 add_chunks 先删后加，自动覆盖旧版）
+# key 用导出文件名：它同时是 upload 的 source_name 和服务端 _source_index 的 key，
+# 三处对齐，删除/覆盖才能对得上号
+_MANIFEST_PATH = Path("data/manifest.json")
+
+
+def _content_hash(text: str) -> str:
+    """算文档内容的 SHA256 指纹。
+
+    为什么用 hash 而不是直接比较文本：
+    - 飞书 markdown 可能几百 KB，逐字符比较慢
+    - hash 定长 64 字符，比较 O(1)
+    - 内容改一个字，hash 完全不同（雪崩效应）——宁可误判"变了"也不会漏判
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _load_manifest() -> dict:
+    """读 manifest。不存在或损坏时返回空结构（视为首次同步，走全量）。
+
+    为什么损坏时不报错而是返回空：
+    宁可全量重传（多花点 embed 钱），不可误跳过（旧版内容悄悄留在库里）。
+    增量同步的第一原则：失败方向必须选"多干活"而不是"少干活"。
+    """
+    if not _MANIFEST_PATH.exists():
+        return {"last_sync": None, "documents": {}}
+    try:
+        return json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"last_sync": None, "documents": {}}
+
+
+def _save_manifest(manifest: dict) -> None:
+    """写 manifest，自动更新 last_sync 时间戳。"""
+    manifest["last_sync"] = datetime.now(timezone.utc).isoformat()
+    _MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _MANIFEST_PATH.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
 
 def upload_to_rag(
     service_url: str,
@@ -489,10 +540,10 @@ def main() -> int:
         help="跳过「库里已有 chunks 警告」的 Enter 确认",
     )
     parser.add_argument(
-        "--public-only",
+        "--include-private",
         action="store_true",
-        help="只同步企业公开的 wiki（visibility=public 的 space）。"
-             "私有 wiki fetch 大概率失败，提前过滤能省时间 + 避免一堆 warn。",
+        help="包含私有 wiki（默认只同步企业公开 visibility=public 的 space）。"
+             "user 身份登录后私有 wiki 也能读到内容，默认排除，避免个人文档误入知识库。",
     )
     args = parser.parse_args()
 
@@ -551,18 +602,22 @@ def main() -> int:
             print(f"❌ 列 wiki 失败（命令错）：{e}")
             return 1
 
-        if args.public_only:
+        if args.include_private:
+            spaces = all_spaces
+            print(f"✓ 找到 {len(spaces)} 个 wiki space（--include-private：包含私有）")
+        else:
+            # 默认只同步企业公开：user 身份能列出所有有权限的 space（含个人私有），
+            # 不过滤会把个人文档也灌进知识库。bot 身份时代"只见公开"是身份
+            # 造成的假象，现在必须显式过滤。
             spaces = [s for s in all_spaces if s.get("visibility") == "public"]
             skipped = len(all_spaces) - len(spaces)
-            print(f"✓ 共找到 {len(all_spaces)} 个 space，"
-                  f"--public-only 过滤后保留 {len(spaces)} 个（跳过 {skipped} 个私有）")
-        else:
-            spaces = all_spaces
-            print(f"✓ 找到 {len(spaces)} 个 wiki space（未过滤私有）")
+            print(f"✓ 共找到 {len(all_spaces)} 个 space，默认只同步企业公开："
+                  f"保留 {len(spaces)} 个，跳过 {skipped} 个私有"
+                  f"（想包含私有加 --include-private）")
 
     if not spaces:
         print("ℹ️  没有 wiki 可同步。可能原因：")
-        print("   1. 个人 wiki 还没设为'企业公开'（飞书后台 → wiki 设置 → 权限）")
+        print("   1. space 都是私有的（默认只同步企业公开；想包含私有加 --include-private）")
         print("   2. 没给 Lark CLI 正确 scope（重新跑 lark-cli auth login --recommend）")
         return 0
 
@@ -571,6 +626,13 @@ def main() -> int:
     written_files: List[Path] = []
     by_type: dict = {}            # {obj_type: count}
     skipped_by_type: dict = {}    # {obj_type: [title, ...]}
+
+    # v0.6 新增：读同步状态
+    # docs_meta 结构：{文件名: {"content_hash", "space_id", "obj_token", "title", "synced_at"}}
+    # 它是"上次同步后，每篇文档在向量库里的真实状态"
+    manifest = _load_manifest()
+    docs_meta = manifest["documents"]
+    unchanged_count = 0  # 内容没变、跳过上传的文档数
 
     for space in spaces:
         sid = space.get("space_id") or space.get("id") or ""
@@ -626,6 +688,18 @@ def main() -> int:
             fname = build_export_filename(sname, title, node_token)
             dname = build_export_dirname(sname, sid)
             out_path = output_dir / dname / fname
+            # v0.6：先比对后落盘——内容没变则完全零操作（不落盘、不上传、不记账）
+            # 跳过落盘是安全的：内容没变 = 本地文件上次写的就是这个内容，重写是纯重复
+            # （唯一边界：本地文件被手动删了但内容没变 → 不会重新生成。
+            #   lark-exports 只是 debug 备份，可接受）
+            new_hash = _content_hash(md)
+            old = docs_meta.get(fname)
+            if old and old.get("content_hash") == new_hash:
+                unchanged_count += 1
+                print(f"    ⊘ {title}（内容没变，跳过落盘和 upload）")
+                continue
+
+            # 内容变了（或新文档）：落盘 + 记账 + 进上传列表
             try:
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_text(md, encoding="utf-8")
@@ -633,6 +707,16 @@ def main() -> int:
                 print(f"    ✗ {title} 写盘失败：{e}")
                 continue
 
+            # 先记新 hash 进 manifest 候选
+            # 注意是"先记账"——上传失败后要回滚（见上传后处理），不能漏。
+            # 原则：manifest 只能记"已成功入库"的状态，这里只是候选
+            docs_meta[fname] = {
+                "content_hash": new_hash,
+                "space_id": sid,
+                "obj_token": obj_token,
+                "title": title,
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            }
             written_files.append(out_path)
             print(f"    ✓ {title} → {out_path.relative_to(output_dir)} ({len(md)} chars)")
 
@@ -646,7 +730,9 @@ def main() -> int:
             print(f"  - obj_type={t}: {c}")
 
     if args.dry_run:
-        print("  (dry-run 模式，跳过上传)")
+        # v0.6：dry-run 只落盘不更新 manifest——没真正上传成功，
+        # 记了 hash 的话下次 sync 会误判"没变"而跳过
+        print("  (dry-run 模式，跳过上传，manifest 不更新)")
         return 0
 
     if not written_files:
@@ -657,9 +743,23 @@ def main() -> int:
     print(f"\n--- 上传 {len(written_files)} 个文件到 {args.service_url} ---")
     result = upload_to_rag(args.service_url, written_files)
 
+    # v0.6 新增：上传失败的文档回滚 manifest 记录
+    # 为什么必须回滚：fetch 时已把新 hash 记进 docs_meta，上传失败不撤销的话，
+    # 下次 sync 一比 hash——"没变"→ 跳过 → 该文档永远不同步。
+    # 这是增量同步最经典的坑：manifest 是"入库成功"的账本，失败的账要销
+    if result["failed"]:
+        failed_names = {f["file"] for f in result["failed"]}
+        for fname in failed_names:
+            if docs_meta.pop(fname, None) is not None:
+                print(f"  ⚠️  {fname} 上传失败，manifest 已回滚（下次 sync 重试）")
+
+    # 全部成功才把候选账本落盘
+    _save_manifest(manifest)
+
     print(f"\n=== 完成 ===")
     print(f"  成功：{result['uploaded']}")
     print(f"  失败：{len(result['failed'])}")
+    print(f"  未变更（跳过 upload）：{unchanged_count}")
     if result["skipped"]:
         print(f"  跳过：{len(result['skipped'])}")
     print(f"  总 chunks：{result['total_chunks']}")

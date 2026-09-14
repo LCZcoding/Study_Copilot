@@ -116,7 +116,7 @@ class StudyCopilotRetriever:
             conn.commit() 
         finally :
             conn.close()  
-    def _db_delete_source(self, source_type: str, source_name: str) ->int:
+    def _db_delete_source(self, source_type: str, source_name: str) -> int:
         """从 SQLite 删除指定 source 的所有行。
 
         Returns:
@@ -126,6 +126,16 @@ class StudyCopilotRetriever:
             _db_init 建的联合索引 idx_source 正好覆盖这两列，
             DELETE 直接走索引定位，不需要把内存里的 id 列表拼进 SQL。
         """
+        conn = sqlite3.connect(_DB_PATH)
+        try:
+            cursor = conn.execute(
+                "DELETE FROM chunks WHERE source_type = ? AND source_name = ?",
+                (source_type, source_name),
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            conn.close()
     def _db_load_all(self) ->int:
         """启动时从 SQLite 全量加载 chunks 到内存向量库。
 
