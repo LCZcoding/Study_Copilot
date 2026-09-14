@@ -215,6 +215,7 @@ class TestStrictRAG:
         没法测出真实差异）。200+ 字符才能让"相关/无关"清晰区分。
         """
         with TestClient(app) as fresh_client:
+            chat_api._retriever.clear() # 清掉 module client 遗留的测试数据
             python_content = (
                 "Python 是一门解释型、面向对象、动态数据类型的高级程序设计语言。"
                 "由 Guido van Rossum 于 1991 年首次发布。Python 的设计哲学是"
