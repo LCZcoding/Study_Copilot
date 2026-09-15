@@ -5,7 +5,7 @@ description = "个人 AI 学习助手 - 跨笔记、文章、收藏的问答系�
 requires-python = ">=3.11"
 readme = "README.md"
 dependencies = [
-    "fastapi>=0.115.0",
+    "fastapi[standard]>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "pydantic>=2.5.0",
     "pyyaml>=6.0",
